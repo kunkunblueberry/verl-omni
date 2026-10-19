@@ -69,6 +69,7 @@ algo/flowdppo.md
 algo/diffusion_dpo.md
 algo/diffusionnft.md
 algo/dgpo.md
+algo/diffusion_opsd.md
 algo/grpo_guard.md
 algo/mixgrpo.md
 algo/diffusion_opd.md
@@ -98,6 +99,7 @@ examples/diffusionnft_trainer.md
 examples/omninft_trainer.md
 examples/dgpo_trainer.md
 examples/awm_trainer.md
+examples/diffusionopsd_trainer.md
 examples/diffusionopd_trainer.md
 examples/flowgrpo_trainer_sd35_drm.md
 examples/qwen_image/flowgrpo_trainer_qwen_image.md
