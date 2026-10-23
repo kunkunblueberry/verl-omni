@@ -30,6 +30,7 @@ start/install.md
 start/engine_backends.md
 start/install_npu.md
 start/install_rocm.md
+start/install_xpu.md
 start/models.md
 start/flowgrpo_quickstart.md
 start/diffusion_v1.md
