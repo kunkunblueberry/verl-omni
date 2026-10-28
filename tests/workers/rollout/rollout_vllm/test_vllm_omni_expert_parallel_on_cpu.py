@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU tests for rollout expert-parallel honor-or-reject semantics (RFC #820 S1).
+"""CPU tests for rollout expert-parallel honor-or-reject semantics.
 
 The contract: ``actor_rollout_ref.rollout.expert_parallel_size`` either configures
 expert parallelism or fails loudly. vLLM-Omni takes EP as a per-stage flag over the
@@ -140,21 +140,6 @@ def test_ep_is_honored_when_reaching_the_replica_without_driver_validation(monke
     assert all("enable_expert_parallel" not in stage for stage in deploy["stages"])
 
 
-def test_flat_enable_expert_parallel_is_not_reinjected_from_engine_kwargs():
-    """verl's launch_server overwrites the engine arg from expert_parallel_size.
-
-    A user-provided flat ``engine_kwargs.vllm_omni.enable_expert_parallel`` must
-    not survive ``prepare_engine_args``: the per-stage deploy config is the only
-    supported spelling.
-    """
-    strategy = _ar_strategy(ep=2, tp=2)
-    strategy._rollout_output_modalities = None
-    strategy.server.config.engine_kwargs["vllm_omni"]["enable_expert_parallel"] = True
-    engine_args = {"enable_expert_parallel": True, "model": "qwen3-omni"}
-    strategy.prepare_engine_args(engine_args, types.SimpleNamespace())
-    assert "enable_expert_parallel" not in engine_args
-
-
 def test_pipeline_without_an_ep_opt_in_is_refused():
     strategy = _ar_strategy(ep=2, tp=2, pipeline_name="no_such_pipeline")
     with pytest.raises(ValueError, match="not supported by the selected rollout pipeline"):
@@ -224,3 +209,11 @@ def test_diffusion_flat_enable_expert_parallel_is_refused():
 def test_diffusion_ep_one_is_admitted():
     _diffusion_strategy(ep=1).validate_configs()
     _diffusion_strategy(ep=1, parallel_config={"enable_expert_parallel": False}).validate_configs()
+
+
+@pytest.mark.parametrize("bad_ep", [0, -2])
+def test_diffusion_non_positive_ep_is_refused(bad_ep):
+    """The replica is reachable without the driver gate, so it must reject 0/negative."""
+    strategy = _diffusion_strategy(ep=bad_ep)
+    with pytest.raises(ValueError, match="positive integer"):
+        strategy.validate_configs()

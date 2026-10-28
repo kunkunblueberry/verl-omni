@@ -202,7 +202,7 @@ def test_rollout_ep_gate_accepts_a_plain_dict_config():
 
 
 def test_diffusion_rollout_ep_is_rejected():
-    """No diffusion stage reads the knob; MoE-DiT EP is #207."""
+    """No diffusion stage reads the knob, so EP>1 there cannot be honored."""
     config = _rollout_config(expert_parallel_size=2, tensor_model_parallel_size=2)
     config.actor_rollout_ref.rollout.rollout_attn_backend = "FLASH_ATTN_3_HUB"
     with pytest.raises(ValueError, match="diffusion rollout"):

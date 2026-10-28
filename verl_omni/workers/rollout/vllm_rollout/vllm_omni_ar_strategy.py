@@ -31,6 +31,7 @@ from vllm_omni.lora.request import LoRARequest
 
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.pipelines.rollout_request import OmniRolloutRequest
+from verl_omni.utils.config import validate_expert_parallel_degree
 from verl_omni.workers.config import OmniModelConfig
 from verl_omni.workers.rollout.vllm_rollout.process_hidden_states import (
     RETURN_FLAG_KEY,
@@ -94,26 +95,17 @@ class ARStrategy(OmniStrategyBase):
         instead of sending the engine a flag it would ignore.
         """
         config = getattr(self.server, "config", None)
-        ep_size = int(getattr(config, "expert_parallel_size", 1) or 1)
-        if ep_size <= 1:
+        if config is None:
+            # Unit-test doubles construct the strategy without a rollout config;
+            # the real server always sets one before validate_configs runs.
             return frozenset()
-
-        tp_size = int(config.tensor_model_parallel_size)
-        dp_size = int(config.data_parallel_size)
-        if ep_size != tp_size * dp_size:
-            raise ValueError(
-                f"actor_rollout_ref.rollout.expert_parallel_size={ep_size} must equal "
-                f"tensor_model_parallel_size * data_parallel_size "
-                f"(={tp_size} * {dp_size} = {tp_size * dp_size})."
-            )
-        if dp_size != 1:
-            raise ValueError(
-                f"actor_rollout_ref.rollout.expert_parallel_size={ep_size} with "
-                f"data_parallel_size={dp_size} is not wired: the vllm-omni rollout realizes DP as "
-                "separate TP-sized rollout replicas and the generated deploy config has no "
-                "data_parallel_size field, so a stage can only shard experts over its own TP ranks "
-                f"({tp_size}). Set data_parallel_size=1 or leave expert_parallel_size=1."
-            )
+        ep_size = validate_expert_parallel_degree(
+            getattr(config, "expert_parallel_size", None),
+            int(getattr(config, "tensor_model_parallel_size", 1)),
+            int(getattr(config, "data_parallel_size", 1)),
+        )
+        if ep_size == 1:
+            return frozenset()
 
         adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
         hook = getattr(adapter_cls, "expert_parallel_stage_ids", None)
@@ -197,10 +189,8 @@ class ARStrategy(OmniStrategyBase):
         pipeline_mode: str,
     ) -> None:
         """Write a deploy config YAML from the adapter's stage topology."""
-        # Resolved by validate_configs / preprocess_engine_kwargs; empty means no
-        # stage opted in, so no stage gets the expert-parallel flag.
-        expert_parallel_stage_ids = getattr(self, "_expert_parallel_stage_ids", frozenset())
         adapter_cls.ensure_pipeline_registered(pipeline_mode)
+        expert_parallel_stage_ids = self._expert_parallel_stage_ids
         stages = adapter_cls.build_stage_configs(pipeline_mode=pipeline_mode)
         stage_ids = [stage.stage_id for stage in stages]
         policy_stage_id = adapter_cls.policy_stage_id(pipeline_mode=pipeline_mode)
@@ -298,10 +288,13 @@ class ARStrategy(OmniStrategyBase):
         engine_kwargs["deploy_config"] = deploy_path
 
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
-        # Expert parallelism is owned by the generated per-stage deploy config.
-        # A global ``enable_expert_parallel`` would be applied to every stage that
-        # owns the field, including non-MoE stages (the code2wav stage in a full
-        # Qwen3-Omni pipeline), so drop it and let the deploy config decide.
+        """Apply mode-specific engine arguments before the engine is created.
+
+        Expert parallelism is owned by the generated per-stage deploy config, so
+        the global ``enable_expert_parallel`` engine arg is dropped here: applied
+        globally it would reach every stage that owns the field, including
+        non-MoE stages that cannot shard experts.
+        """
         engine_args.pop("enable_expert_parallel", None)
         if engine_args.get("enable_lora"):
             from verl_omni.utils.vllm_omni.patch import patch_vllm_omni_lora_config
