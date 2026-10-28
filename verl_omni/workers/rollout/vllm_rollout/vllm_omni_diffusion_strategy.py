@@ -247,7 +247,11 @@ class DiffusionStrategy(OmniStrategyBase):
         such a pipeline exists.
         """
         config = self.server.config
-        ep_size = coerce_expert_parallel_size(getattr(config, "expert_parallel_size", None))
+        # A null size means "unset": normalize it before the launcher compares it
+        # (verl's launch_server evaluates ``expert_parallel_size > 1``).
+        if getattr(config, "expert_parallel_size", 1) is None:
+            config.expert_parallel_size = 1
+        ep_size = coerce_expert_parallel_size(config.expert_parallel_size)
         omni_kwargs = (getattr(config, "engine_kwargs", None) or {}).get("vllm_omni", {}) or {}
         parallel_config = omni_kwargs.get("parallel_config") or {}
         nested_flag = hasattr(parallel_config, "get") and bool(parallel_config.get("enable_expert_parallel", False))

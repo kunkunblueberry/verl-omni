@@ -91,15 +91,56 @@ def _validate_delta_sharded(config: Any) -> None:
             )
 
 
+def reject_engine_side_expert_parallel(
+    omni_kwargs: Any,
+    *,
+    prefix: str = "actor_rollout_ref.rollout",
+) -> None:
+    """Refuse engine-side EP flags that bypass the parallel-size accounting.
+
+    ``engine_kwargs.vllm_omni`` reaches the engine without going through
+    ``expert_parallel_size``. The flat ``enable_expert_parallel`` is overwritten
+    by verl's ``launch_server`` on the AR path (so a request for EP silently runs
+    with EP off) and forwarded unvalidated by the diffusion ingress; the nested
+    ``parallel_config.enable_expert_parallel`` is copied into the engine
+    arguments verbatim. Both are refused in the driver gate and in the rollout
+    replica, because the replica is validated independently of the driver.
+    """
+    if not hasattr(omni_kwargs, "get"):
+        return
+    if omni_kwargs.get("enable_expert_parallel", False):
+        raise ValueError(
+            f"{prefix}.engine_kwargs.vllm_omni.enable_expert_parallel is not a supported spelling: "
+            "verl's launch_server overwrites the engine arg from "
+            f"{prefix}.expert_parallel_size, and the vLLM-Omni CLI rejects --enable-expert-parallel "
+            f"under --omni. Set {prefix}.expert_parallel_size instead — the rollout writes the "
+            "per-stage flag into the generated deploy config."
+        )
+    parallel_config = omni_kwargs.get("parallel_config") or {}
+    if hasattr(parallel_config, "get") and parallel_config.get("enable_expert_parallel", False):
+        raise ValueError(
+            f"{prefix}.engine_kwargs.vllm_omni.parallel_config.enable_expert_parallel bypasses the "
+            f"parallel-size accounting: the rollout replica sizes its ranks from "
+            f"{prefix}.expert_parallel_size, and the engine-side flag is then set from that size. "
+            f"Set {prefix}.expert_parallel_size instead and drop the engine_kwargs entry."
+        )
+
+
 def coerce_expert_parallel_size(raw_ep_size: Any, *, prefix: str = "actor_rollout_ref.rollout") -> int:
     """Coerce the configured EP size, treating an unset value as "off".
 
     ``None`` means the knob was never configured, so EP is off. Any other value
-    must be a positive integer: a zero or negative degree is a configuration
-    error, not a way to spell "off".
+    must be a whole positive integer: a fractional float or a bool is a
+    configuration error rather than a value to truncate, and a zero or negative
+    degree is an error rather than a way to spell "off".
     """
     if raw_ep_size is None:
         return 1
+    # bool is an int subclass, so it must be excluded before the numeric checks.
+    if isinstance(raw_ep_size, bool):
+        raise ValueError(f"{prefix}.expert_parallel_size must be a positive integer, got {raw_ep_size!r}.")
+    if isinstance(raw_ep_size, float) and not raw_ep_size.is_integer():
+        raise ValueError(f"{prefix}.expert_parallel_size must be a whole number, got {raw_ep_size!r}.")
     try:
         ep_size = int(raw_ep_size)
     except (TypeError, ValueError) as exc:
@@ -177,23 +218,10 @@ def _validate_expert_parallel(config: Any) -> None:
 
     # Both escape hatches are checked before the EP==1 early return: they bypass
     # the size accounting even when the size knob itself is left at 1.
-    flat_flag = _select(config, f"{rollout}.engine_kwargs.vllm_omni.enable_expert_parallel", False)
-    if flat_flag:
-        raise ValueError(
-            f"{rollout}.engine_kwargs.vllm_omni.enable_expert_parallel is not a supported spelling: "
-            "verl's launch_server overwrites the engine arg from "
-            f"{rollout}.expert_parallel_size, and the vLLM-Omni CLI rejects --enable-expert-parallel "
-            f"under --omni. Set {rollout}.expert_parallel_size instead — the rollout writes the "
-            "per-stage flag into the generated deploy config."
-        )
-    parallel_config = _select(config, f"{rollout}.engine_kwargs.vllm_omni.parallel_config", None) or {}
-    if hasattr(parallel_config, "get") and parallel_config.get("enable_expert_parallel", False):
-        raise ValueError(
-            f"{rollout}.engine_kwargs.vllm_omni.parallel_config.enable_expert_parallel bypasses the "
-            f"parallel-size accounting: the rollout replica sizes its ranks from "
-            f"{rollout}.expert_parallel_size, and the engine-side flag is then set from that size. "
-            f"Set {rollout}.expert_parallel_size instead and drop the engine_kwargs entry."
-        )
+    reject_engine_side_expert_parallel(
+        _select(config, f"{rollout}.engine_kwargs.vllm_omni", None) or {},
+        prefix=rollout,
+    )
 
     tp_size = int(_select(config, f"{rollout}.tensor_model_parallel_size", 1))
     dp_size = int(_select(config, f"{rollout}.data_parallel_size", 1))

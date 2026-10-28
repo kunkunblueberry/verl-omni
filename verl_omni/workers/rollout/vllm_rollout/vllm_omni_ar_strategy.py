@@ -31,7 +31,7 @@ from vllm_omni.lora.request import LoRARequest
 
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.pipelines.rollout_request import OmniRolloutRequest
-from verl_omni.utils.config import validate_expert_parallel_degree
+from verl_omni.utils.config import reject_engine_side_expert_parallel, validate_expert_parallel_degree
 from verl_omni.workers.config import OmniModelConfig
 from verl_omni.workers.rollout.vllm_rollout.process_hidden_states import (
     RETURN_FLAG_KEY,
@@ -75,15 +75,25 @@ class ARStrategy(OmniStrategyBase):
         self._expert_parallel_stage_ids: frozenset[int] = frozenset()
 
     def validate_configs(self) -> None:
-        if self.server.config.max_model_len is None:
-            self.server.config.max_model_len = self.server.config.prompt_length + self.server.config.response_length
+        config = self.server.config
+        if config.max_model_len is None:
+            config.max_model_len = config.prompt_length + config.response_length
+        # A null size means "unset": normalize it before the launcher compares it
+        # (verl's launch_server evaluates ``expert_parallel_size > 1``).
+        if getattr(config, "expert_parallel_size", 1) is None:
+            config.expert_parallel_size = 1
+        reject_engine_side_expert_parallel(self._omni_engine_kwargs())
         pipeline_name, pipeline_mode = self._pipeline_selection()
         self._expert_parallel_stage_ids = self._resolve_expert_parallel_stage_ids(pipeline_name, pipeline_mode)
 
+    def _omni_engine_kwargs(self) -> Any:
+        """Return the configured ``engine_kwargs.vllm_omni`` mapping."""
+        config = getattr(self.server, "config", None)
+        return (getattr(config, "engine_kwargs", None) or {}).get("vllm_omni", {}) or {}
+
     def _pipeline_selection(self) -> tuple[Any, str]:
         """Return the configured ``(pipeline_name, pipeline_mode)``."""
-        config = getattr(self.server, "config", None)
-        omni_kwargs = (getattr(config, "engine_kwargs", None) or {}).get("vllm_omni", {}) or {}
+        omni_kwargs = self._omni_engine_kwargs()
         return omni_kwargs.get("pipeline_name"), omni_kwargs.get("pipeline_mode", "thinker_only")
 
     def _resolve_expert_parallel_stage_ids(self, pipeline_name: Any, pipeline_mode: str) -> frozenset[int]:

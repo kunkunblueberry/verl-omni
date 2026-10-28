@@ -113,6 +113,46 @@ def test_ep_with_dp_greater_than_one_is_refused():
         strategy.validate_configs()
 
 
+@pytest.mark.parametrize(
+    "engine_kwargs",
+    [
+        {"enable_expert_parallel": True},
+        {"parallel_config": {"enable_expert_parallel": True}},
+    ],
+)
+def test_replica_rejects_engine_side_ep_overrides(engine_kwargs):
+    """The replica is validated independently of the driver, so it must refuse too.
+
+    Otherwise a server constructed without ``validate_config`` would accept a
+    request for EP and then run with EP off (flat spelling) or leave an
+    unaccounted engine flag in place (nested spelling). EP=1 is the dangerous
+    case: the driver gate would not be the thing that catches it.
+    """
+    strategy = _ar_strategy(ep=1, tp=2)
+    strategy.server.config.engine_kwargs["vllm_omni"].update(engine_kwargs)
+    with pytest.raises(ValueError, match="expert_parallel"):
+        strategy.validate_configs()
+
+
+def test_replica_normalizes_an_unset_size_before_launch():
+    """verl's launch_server compares ``expert_parallel_size > 1``.
+
+    A null size passes validation but would crash the launcher, so the replica
+    normalizes it to 1 on the config object itself.
+    """
+    strategy = _ar_strategy(ep=None, tp=2)
+    strategy.validate_configs()
+    assert strategy.server.config.expert_parallel_size == 1
+
+
+@pytest.mark.parametrize("bad_ep", [2.9, True])
+def test_replica_rejects_non_integer_sizes(bad_ep):
+    """Truncating 2.9 to 2 (or True to 1) would silently change the EP degree."""
+    strategy = _ar_strategy(ep=bad_ep, tp=2)
+    with pytest.raises(ValueError, match="expert_parallel_size"):
+        strategy.validate_configs()
+
+
 def test_ep_is_honored_when_reaching_the_replica_without_driver_validation(monkeypatch):
     """preprocess_engine_kwargs must not silently drop EP if validate was skipped.
 
@@ -217,3 +257,10 @@ def test_diffusion_non_positive_ep_is_refused(bad_ep):
     strategy = _diffusion_strategy(ep=bad_ep)
     with pytest.raises(ValueError, match="positive integer"):
         strategy.validate_configs()
+
+
+def test_diffusion_normalizes_an_unset_size_before_launch():
+    """verl's launch_server compares ``expert_parallel_size > 1``, so None must become 1."""
+    strategy = _diffusion_strategy(ep=None)
+    strategy.validate_configs()
+    assert strategy.server.config.expert_parallel_size == 1
