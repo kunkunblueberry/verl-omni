@@ -232,6 +232,35 @@ class DiffusionStrategy(OmniStrategyBase):
             return _NPU_WORKER_EXTENSION
         return _GPU_WORKER_EXTENSION
 
+    def validate_configs(self) -> None:
+        """Refuse expert parallelism the diffusion rollout cannot honor.
+
+        No diffusion stage reads ``expert_parallel_size``, and vLLM-Omni gates
+        diffusion EP per pipeline: a pipeline has to declare
+        ``parallel_config.enable_expert_parallel`` in its own stage config to run
+        it. The rollout also copies ``engine_kwargs.vllm_omni`` into the engine
+        verbatim, so both the nested ``parallel_config`` and the flat
+        ``enable_expert_parallel`` spellings reach the engine unvalidated — the
+        flat one is a live escape hatch, not a silent no-op. Refuse them here;
+        wiring a pipeline that opts in is a one-line change in this method once
+        such a pipeline exists (MoE-DiT is #207).
+        """
+        config = self.server.config
+        ep_size = int(getattr(config, "expert_parallel_size", 1) or 1)
+        omni_kwargs = (getattr(config, "engine_kwargs", None) or {}).get("vllm_omni", {}) or {}
+        parallel_config = omni_kwargs.get("parallel_config") or {}
+        nested_flag = hasattr(parallel_config, "get") and bool(parallel_config.get("enable_expert_parallel", False))
+        flat_flag = bool(omni_kwargs.get("enable_expert_parallel", False))
+        if ep_size <= 1 and not (nested_flag or flat_flag):
+            return
+        raise ValueError(
+            "Expert parallelism is not wired for the diffusion rollout: no diffusion stage consumes "
+            "actor_rollout_ref.rollout.expert_parallel_size, and vLLM-Omni enables diffusion EP only for "
+            "pipelines that opt in through their own stage config. MoE-DiT EP is tracked by #207. "
+            "Leave expert_parallel_size=1 and drop any enable_expert_parallel entry from "
+            "engine_kwargs.vllm_omni (both the flat key and parallel_config)."
+        )
+
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
         config = self.server.config
         parallel_config = engine_args.get("parallel_config")

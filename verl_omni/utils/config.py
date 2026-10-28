@@ -91,12 +91,102 @@ def _validate_delta_sharded(config: Any) -> None:
             )
 
 
+def _validate_expert_parallel(config: Any) -> None:
+    """Honor-or-reject gate for rollout expert parallelism (RFC #820, S1).
+
+    ``actor_rollout_ref.rollout.expert_parallel_size`` is an integer, but every
+    backend that consumes it forwards only a boolean over ranks that already
+    exist: verl's vLLM rollout sends ``enable_expert_parallel = EP > 1`` and vLLM
+    derives the degree as TP x DP. An EP size that disagrees with TP x DP
+    therefore cannot be honored, and the diffusion rollout declares the same knob
+    with no consumer at all (MoE-DiT EP is #207). Both are refused here instead
+    of being silently ignored.
+
+    Two extra fail-closed rules fall out of how vLLM-Omni actually realizes the
+    flag (both verified against the pinned sources):
+
+    * ``engine_kwargs.vllm_omni.enable_expert_parallel`` (flat spelling) is never
+      honored: verl's ``launch_server`` overwrites the engine arg from
+      ``expert_parallel_size``, and the vLLM-Omni CLI rejects
+      ``--enable-expert-parallel`` under ``--omni``. On the diffusion path it is
+      worse than a no-op — the diffusion ingress forwards it to the engine
+      unvalidated. Refuse it in both cases.
+    * ``data_parallel_size > 1`` cannot host EP: the vllm-omni rollout realizes
+      DP as separate TP-sized rollout replicas and the generated deploy config
+      has no ``data_parallel_size`` field, so a stage can only shard experts over
+      its own TP ranks.
+
+    Whether the *model* can run EP needs the architecture, so that half of the
+    gate lives in the rollout replica (``ARStrategy.validate_configs``).
+    """
+    rollout = "actor_rollout_ref.rollout"
+    raw_ep_size = _select(config, f"{rollout}.expert_parallel_size", 1)
+    try:
+        ep_size = int(raw_ep_size)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{rollout}.expert_parallel_size must be an integer, got {raw_ep_size!r}.") from exc
+    if ep_size < 1:
+        raise ValueError(f"{rollout}.expert_parallel_size must be a positive integer, got {raw_ep_size!r}.")
+
+    # Both escape hatches are checked before the EP==1 early return: they bypass
+    # the size accounting even when the size knob itself is left at 1.
+    flat_flag = _select(config, f"{rollout}.engine_kwargs.vllm_omni.enable_expert_parallel", False)
+    if flat_flag:
+        raise ValueError(
+            f"{rollout}.engine_kwargs.vllm_omni.enable_expert_parallel is not a supported spelling: "
+            "verl's launch_server overwrites the engine arg from "
+            f"{rollout}.expert_parallel_size, and the vLLM-Omni CLI rejects --enable-expert-parallel "
+            f"under --omni. Set {rollout}.expert_parallel_size instead — the rollout writes the "
+            "per-stage flag into the generated deploy config."
+        )
+    parallel_config = _select(config, f"{rollout}.engine_kwargs.vllm_omni.parallel_config", None) or {}
+    if hasattr(parallel_config, "get") and parallel_config.get("enable_expert_parallel", False):
+        raise ValueError(
+            f"{rollout}.engine_kwargs.vllm_omni.parallel_config.enable_expert_parallel bypasses the "
+            f"parallel-size accounting: the rollout replica sizes its ranks from "
+            f"{rollout}.expert_parallel_size, and the engine-side flag is then set from that size. "
+            f"Set {rollout}.expert_parallel_size instead and drop the engine_kwargs entry."
+        )
+
+    if ep_size <= 1:
+        return
+
+    # ``rollout_attn_backend`` is a DiffusionRolloutConfig field; verl's
+    # RolloutConfig (the omni/AR rollout) has no such key.
+    if _select(config, f"{rollout}.rollout_attn_backend", None) is not None:
+        raise ValueError(
+            f"{rollout}.expert_parallel_size={ep_size} is not supported by the diffusion rollout: "
+            "vLLM-Omni gates diffusion EP per pipeline and only the HunyuanImage-3.0 MoE-DiT pipeline "
+            "opts in today, which is tracked by #207. Leave expert_parallel_size=1 for diffusion."
+        )
+
+    tp_size = int(_select(config, f"{rollout}.tensor_model_parallel_size", 1))
+    dp_size = int(_select(config, f"{rollout}.data_parallel_size", 1))
+    if ep_size != tp_size * dp_size:
+        raise ValueError(
+            f"{rollout}.expert_parallel_size={ep_size} must equal tensor_model_parallel_size * "
+            f"data_parallel_size (={tp_size} * {dp_size} = {tp_size * dp_size}): vLLM expert "
+            "parallelism is a boolean over the existing TP x DP ranks, not an independent world "
+            "dimension. Lower expert_parallel_size or raise the TP/DP sizes."
+        )
+    if dp_size != 1:
+        raise ValueError(
+            f"{rollout}.expert_parallel_size={ep_size} with data_parallel_size={dp_size} is not wired: "
+            "the vllm-omni rollout realizes DP as separate TP-sized rollout replicas and the generated "
+            "deploy config has no data_parallel_size field, so a stage can only shard experts over its "
+            f"own TP ranks ({tp_size}). Set data_parallel_size=1 (expert_parallel_size then equals TP), "
+            "or leave expert_parallel_size=1."
+        )
+
+
 def validate_config(config: Any) -> None:
     """Validate configuration values that otherwise trigger silent fallbacks."""
     if _select(config, "actor_rollout_ref.actor.enable_timestep_staging", False):
         sp_size = _select(config, "actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size", 1)
         if sp_size != 1:
             raise ValueError("Timestep staging requires ulysses_sequence_parallel_size=1.")
+
+    _validate_expert_parallel(config)
 
     _validate_delta_sharded(config)
 

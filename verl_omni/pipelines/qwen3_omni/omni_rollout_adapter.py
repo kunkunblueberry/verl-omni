@@ -132,3 +132,26 @@ class Qwen3OmniRolloutAdapter(OmniRolloutPipelineBase):
         if pipeline_mode == "thinker_only" and stage_id == 0:
             return {"model_arch": "Qwen3OmniMoeThinkerForConditionalGeneration"}
         return {}
+
+    @classmethod
+    def expert_parallel_stage_ids(cls, pipeline_mode: str = "thinker_only") -> frozenset[int]:
+        """Opt the policy stage (the Thinker) into expert parallelism.
+
+        Qwen3-Omni is MoE in both the Thinker (30B total / 3B active) and the
+        Talker, but the Thinker is the policy stage and the one whose expert
+        weights dominate rollout memory. Sharding the Talker's experts as well
+        would change its numerics for no measured gain, so it stays TP-sharded
+        until a benchmark asks for it.
+
+        Args:
+            pipeline_mode (str): Pipeline mode selector. One of
+                ``thinker_only``, ``thinker_talker``, ``full``.
+
+        Returns:
+            frozenset[int]: The policy stage ID.
+        """
+        if pipeline_mode not in ("thinker_only", "thinker_talker", "full"):
+            raise ValueError(
+                f"Unknown pipeline_mode={pipeline_mode!r}. Expected one of: 'thinker_only', 'thinker_talker', 'full'."
+            )
+        return frozenset({cls.policy_stage_id(pipeline_mode=pipeline_mode)})

@@ -994,6 +994,46 @@ class OmniRolloutPipelineBase:
         return None
 
     @classmethod
+    def expert_parallel_stage_ids(cls, pipeline_mode="thinker_only") -> frozenset[int]:
+        """Return stages whose MoE layers may run under expert parallelism.
+
+        vLLM-Omni takes expert parallelism as a per-stage boolean
+        (``enable_expert_parallel``) over the ranks that stage already spans, not
+        as an extra world dimension, so the deploy config carries a flag rather
+        than a size. A pipeline opts in per stage here; the rollout refuses
+        ``expert_parallel_size > 1`` for every pipeline that does not, instead of
+        forwarding a flag the stage would ignore.
+
+        Default returns an empty set: models that are dense, or that have no
+        measured reason to shard experts, get the fail-closed path for free.
+
+        Args:
+            pipeline_mode: The mode used to build the stages.
+
+        Returns:
+            frozenset[int]: Stage IDs that may receive ``enable_expert_parallel``.
+        """
+        return frozenset()
+
+    @classmethod
+    def expert_parallel_pipelines(cls) -> dict[str, frozenset[int]]:
+        """Return every registered pipeline that opts into expert parallelism.
+
+        Used to name the supported combinations when the rollout refuses an
+        ``expert_parallel_size`` the selected pipeline cannot honor.
+
+        Returns:
+            dict[str, frozenset[int]]: Registered pipeline model_type to its
+            expert-parallel stage IDs, omitting pipelines that opt out.
+        """
+        supported: dict[str, frozenset[int]] = {}
+        for model_type, adapter_cls in cls._registry.items():
+            stage_ids = adapter_cls.expert_parallel_stage_ids()
+            if stage_ids:
+                supported[model_type] = stage_ids
+        return supported
+
+    @classmethod
     def policy_stage_id(cls, pipeline_mode="thinker_only") -> int:
         """Return the stage whose sampling parameters and logprobs define the policy."""
         return 0

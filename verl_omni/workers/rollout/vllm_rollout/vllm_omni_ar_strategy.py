@@ -71,10 +71,67 @@ class ARStrategy(OmniStrategyBase):
         self._rollout_fields_by_request_id: dict[str, dict[str, Any]] = {}
         self._policy_stage_index = 0
         self._policy_sampling_constraints: dict[str, Any] = {}
+        self._expert_parallel_stage_ids: frozenset[int] = frozenset()
 
     def validate_configs(self) -> None:
         if self.server.config.max_model_len is None:
             self.server.config.max_model_len = self.server.config.prompt_length + self.server.config.response_length
+        pipeline_name, pipeline_mode = self._pipeline_selection()
+        self._expert_parallel_stage_ids = self._resolve_expert_parallel_stage_ids(pipeline_name, pipeline_mode)
+
+    def _pipeline_selection(self) -> tuple[Any, str]:
+        """Return the configured ``(pipeline_name, pipeline_mode)``."""
+        config = getattr(self.server, "config", None)
+        omni_kwargs = (getattr(config, "engine_kwargs", None) or {}).get("vllm_omni", {}) or {}
+        return omni_kwargs.get("pipeline_name"), omni_kwargs.get("pipeline_mode", "thinker_only")
+
+    def _resolve_expert_parallel_stage_ids(self, pipeline_name: Any, pipeline_mode: str) -> frozenset[int]:
+        """Return the stages to run with expert parallelism, or refuse EP>1.
+
+        Expert parallelism reaches vLLM-Omni as a per-stage boolean over the
+        ranks a stage already spans, so it is only honored when the selected
+        pipeline opts its policy stage in. Every other combination raises here
+        instead of sending the engine a flag it would ignore.
+        """
+        config = getattr(self.server, "config", None)
+        ep_size = int(getattr(config, "expert_parallel_size", 1) or 1)
+        if ep_size <= 1:
+            return frozenset()
+
+        tp_size = int(config.tensor_model_parallel_size)
+        dp_size = int(config.data_parallel_size)
+        if ep_size != tp_size * dp_size:
+            raise ValueError(
+                f"actor_rollout_ref.rollout.expert_parallel_size={ep_size} must equal "
+                f"tensor_model_parallel_size * data_parallel_size "
+                f"(={tp_size} * {dp_size} = {tp_size * dp_size})."
+            )
+        if dp_size != 1:
+            raise ValueError(
+                f"actor_rollout_ref.rollout.expert_parallel_size={ep_size} with "
+                f"data_parallel_size={dp_size} is not wired: the vllm-omni rollout realizes DP as "
+                "separate TP-sized rollout replicas and the generated deploy config has no "
+                "data_parallel_size field, so a stage can only shard experts over its own TP ranks "
+                f"({tp_size}). Set data_parallel_size=1 or leave expert_parallel_size=1."
+            )
+
+        adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
+        hook = getattr(adapter_cls, "expert_parallel_stage_ids", None)
+        if hook is not None:
+            supported = hook(pipeline_mode)
+            policy_stage_id = adapter_cls.policy_stage_id(pipeline_mode=pipeline_mode)
+            if policy_stage_id in supported:
+                return frozenset({policy_stage_id})
+
+        supported_pipelines = ", ".join(sorted(OmniRolloutPipelineBase.expert_parallel_pipelines())) or "none"
+        raise ValueError(
+            f"actor_rollout_ref.rollout.expert_parallel_size={ep_size} is not supported by the selected "
+            f"rollout pipeline (pipeline_name={pipeline_name!r}, pipeline_mode={pipeline_mode!r}). "
+            "vLLM-Omni enables expert parallelism per stage through the generated deploy config, so a "
+            "pipeline has to opt its policy stage in. Set "
+            "actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name to an expert-parallel "
+            f"pipeline ({supported_pipelines}), or leave expert_parallel_size=1."
+        )
 
     def apply_quantization(self) -> tuple[str | None, dict[str, Any]]:
         return vLLMHttpServer._apply_quantization(self.server)
@@ -103,6 +160,9 @@ class ARStrategy(OmniStrategyBase):
                     "cannot be replayed by its actor adapter."
                 )
             self._rollout_adapter = adapter_cls
+            # Resolved again here (not only in validate_configs) so a caller that
+            # reaches engine creation without validation still cannot drop EP.
+            self._expert_parallel_stage_ids = self._resolve_expert_parallel_stage_ids(pipeline_name, pipeline_mode)
             self._write_deploy_config(engine_kwargs, pipeline_name, adapter_cls, pipeline_mode)
             self.server._rollout_flags = adapter_cls.rollout_flags(pipeline_mode=pipeline_mode)
             adapter_overrides = adapter_cls.get_engine_hf_overrides(pipeline_mode=pipeline_mode)
@@ -130,9 +190,16 @@ class ARStrategy(OmniStrategyBase):
                 engine_kwargs[underscore_key.replace("_", "-")] = engine_kwargs.pop(underscore_key)
 
     def _write_deploy_config(
-        self, engine_kwargs: dict[str, Any], pipeline_name: str, adapter_cls: Any, pipeline_mode: str
+        self,
+        engine_kwargs: dict[str, Any],
+        pipeline_name: str,
+        adapter_cls: Any,
+        pipeline_mode: str,
     ) -> None:
         """Write a deploy config YAML from the adapter's stage topology."""
+        # Resolved by validate_configs / preprocess_engine_kwargs; empty means no
+        # stage opted in, so no stage gets the expert-parallel flag.
+        expert_parallel_stage_ids = getattr(self, "_expert_parallel_stage_ids", frozenset())
         adapter_cls.ensure_pipeline_registered(pipeline_mode)
         stages = adapter_cls.build_stage_configs(pipeline_mode=pipeline_mode)
         stage_ids = [stage.stage_id for stage in stages]
@@ -204,6 +271,10 @@ class ARStrategy(OmniStrategyBase):
                         if getattr(stage, "execution_type", None) == StageExecutionType.DIFFUSION
                         else {}
                     ),
+                    # vLLM-Omni takes expert parallelism as a per-stage flag over
+                    # the ranks the stage already spans; the size itself is not a
+                    # world dimension, so only opted-in stages get the flag.
+                    **({"enable_expert_parallel": True} if stage.stage_id in expert_parallel_stage_ids else {}),
                     "engine_extras": stage_extras[stage.stage_id],
                 }
                 for stage in stages
@@ -227,6 +298,11 @@ class ARStrategy(OmniStrategyBase):
         engine_kwargs["deploy_config"] = deploy_path
 
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
+        # Expert parallelism is owned by the generated per-stage deploy config.
+        # A global ``enable_expert_parallel`` would be applied to every stage that
+        # owns the field, including non-MoE stages (the code2wav stage in a full
+        # Qwen3-Omni pipeline), so drop it and let the deploy config decide.
+        engine_args.pop("enable_expert_parallel", None)
         if engine_args.get("enable_lora"):
             from verl_omni.utils.vllm_omni.patch import patch_vllm_omni_lora_config
 
