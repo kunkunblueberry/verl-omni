@@ -102,12 +102,7 @@ def test_ep_must_equal_tp_times_dp():
 
 
 def test_ep_with_dp_greater_than_one_is_refused():
-    """The vllm-omni rollout realizes DP as separate TP-sized replicas.
-
-    The generated deploy config has no data_parallel_size field, so a stage can
-    only shard experts over its own TP ranks: EP=TP*DP with DP>1 would silently
-    deliver EP=TP.
-    """
+    """The deploy config cannot express DP, so EP=TP*DP would silently deliver EP=TP."""
     strategy = _ar_strategy(ep=4, tp=2, dp=2)
     with pytest.raises(ValueError, match=r"data_parallel_size=2 is not wired"):
         strategy.validate_configs()
@@ -121,13 +116,7 @@ def test_ep_with_dp_greater_than_one_is_refused():
     ],
 )
 def test_replica_rejects_engine_side_ep_overrides(engine_kwargs):
-    """The replica is validated independently of the driver, so it must refuse too.
-
-    Otherwise a server constructed without ``validate_config`` would accept a
-    request for EP and then run with EP off (flat spelling) or leave an
-    unaccounted engine flag in place (nested spelling). EP=1 is the dangerous
-    case: the driver gate would not be the thing that catches it.
-    """
+    """The replica is validated without the driver gate, so it must refuse EP=1 too."""
     strategy = _ar_strategy(ep=1, tp=2)
     strategy.server.config.engine_kwargs["vllm_omni"].update(engine_kwargs)
     with pytest.raises(ValueError, match="expert_parallel"):
@@ -135,11 +124,7 @@ def test_replica_rejects_engine_side_ep_overrides(engine_kwargs):
 
 
 def test_replica_normalizes_an_unset_size_before_launch():
-    """verl's launch_server compares ``expert_parallel_size > 1``.
-
-    A null size passes validation but would crash the launcher, so the replica
-    normalizes it to 1 on the config object itself.
-    """
+    """A null size would crash the launcher, so the replica normalizes it to 1."""
     strategy = _ar_strategy(ep=None, tp=2)
     strategy.validate_configs()
     assert strategy.server.config.expert_parallel_size == 1
@@ -153,28 +138,22 @@ def test_replica_rejects_non_integer_sizes(bad_ep):
         strategy.validate_configs()
 
 
-def test_ep_is_honored_when_reaching_the_replica_without_driver_validation(monkeypatch):
-    """preprocess_engine_kwargs must not silently drop EP if validate was skipped.
-
-    ``_write_deploy_config`` reads the resolved stage set from ``self``, so a
-    caller that reaches engine creation without ``validate_configs`` still gets
-    the flag written instead of a silently EP-less deploy config. The EP=2 case
-    asserts on the generated YAML, not just the internal attribute.
-    """
+def test_validate_configs_then_deploy_config_carries_the_flag(monkeypatch):
+    """The validated stage set is what the generated YAML is built from."""
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
 
     strategy = _ar_strategy(ep=2, tp=2)
+    strategy.validate_configs()
     engine_kwargs = {"pipeline_name": QWEN3_OMNI_PIPELINE, "pipeline_mode": "thinker_only"}
     strategy.preprocess_engine_kwargs(engine_kwargs)
-    assert strategy._expert_parallel_stage_ids == frozenset({0})
     with open(engine_kwargs["deploy-config"]) as handle:
         deploy = yaml.safe_load(handle)
     assert deploy["stages"][0]["enable_expert_parallel"] is True
 
     accepted = _ar_strategy(ep=1, tp=2)
+    accepted.validate_configs()
     engine_kwargs = {"pipeline_name": QWEN3_OMNI_PIPELINE, "pipeline_mode": "thinker_only"}
     accepted.preprocess_engine_kwargs(engine_kwargs)
-    assert accepted._expert_parallel_stage_ids == frozenset()
     with open(engine_kwargs["deploy-config"]) as handle:
         deploy = yaml.safe_load(handle)
     assert all("enable_expert_parallel" not in stage for stage in deploy["stages"])
@@ -187,11 +166,7 @@ def test_pipeline_without_an_ep_opt_in_is_refused():
 
 
 def test_prepare_engine_args_drops_the_global_ep_flag():
-    """A global flag would hit every stage that owns the field, non-MoE ones included.
-
-    The generated per-stage deploy config is the single source of truth, so the
-    global engine arg must not reach ``AsyncOmni``.
-    """
+    """The per-stage deploy config is the only channel; the global arg must not survive."""
     strategy = _ar_strategy(ep=2, tp=2)
     strategy._rollout_output_modalities = None
     engine_args = {"enable_expert_parallel": True, "model": "qwen3-omni"}
@@ -236,11 +211,7 @@ def test_diffusion_parallel_config_escape_hatch_is_refused():
 
 
 def test_diffusion_flat_enable_expert_parallel_is_refused():
-    """The flat spelling reaches the diffusion engine unvalidated (live escape hatch).
-
-    ``_diffusion_ingress_allowed_fields()`` keeps ``enable_expert_parallel``, so a
-    user-set flat flag would configure EP without passing through any size check.
-    """
+    """The diffusion ingress forwards the flat flag unvalidated, so it is a live hatch."""
     strategy = _diffusion_strategy(ep=1, flat_flag=True)
     with pytest.raises(ValueError, match="not wired for the diffusion rollout"):
         strategy.validate_configs()

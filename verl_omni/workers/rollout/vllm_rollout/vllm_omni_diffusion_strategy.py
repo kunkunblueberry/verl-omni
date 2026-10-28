@@ -236,23 +236,20 @@ class DiffusionStrategy(OmniStrategyBase):
     def validate_configs(self) -> None:
         """Refuse expert parallelism the diffusion rollout cannot honor.
 
-        No diffusion stage reads ``expert_parallel_size``, and vLLM-Omni gates
-        diffusion EP per pipeline: a pipeline has to declare
-        ``parallel_config.enable_expert_parallel`` in its own stage config to run
-        it. The rollout also copies ``engine_kwargs.vllm_omni`` into the engine
-        verbatim, so both the nested ``parallel_config`` and the flat
-        ``enable_expert_parallel`` spellings reach the engine unvalidated — the
-        flat one is a live escape hatch, not a silent no-op. Refuse them here;
-        wiring a pipeline that opts in is a one-line change in this method once
-        such a pipeline exists.
+        No diffusion stage reads ``expert_parallel_size``, and vLLM-Omni enables
+        diffusion EP only for pipelines that opt in through their own stage
+        config. The rollout copies ``engine_kwargs.vllm_omni`` into the engine
+        verbatim, so both engine-flag spellings are refused here as well.
+
+        Raises:
+            ValueError: If EP is requested, by size or by either engine flag.
         """
         config = self.server.config
-        # A null size means "unset": normalize it before the launcher compares it
-        # (verl's launch_server evaluates ``expert_parallel_size > 1``).
-        if getattr(config, "expert_parallel_size", 1) is None:
+        # The launcher compares this field, so an unset value must become 1.
+        if config.expert_parallel_size is None:
             config.expert_parallel_size = 1
         ep_size = coerce_expert_parallel_size(config.expert_parallel_size)
-        omni_kwargs = (getattr(config, "engine_kwargs", None) or {}).get("vllm_omni", {}) or {}
+        omni_kwargs = config.engine_kwargs.get("vllm_omni", {}) or {}
         parallel_config = omni_kwargs.get("parallel_config") or {}
         nested_flag = hasattr(parallel_config, "get") and bool(parallel_config.get("enable_expert_parallel", False))
         flat_flag = bool(omni_kwargs.get("enable_expert_parallel", False))

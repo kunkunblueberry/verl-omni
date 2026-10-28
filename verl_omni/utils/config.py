@@ -96,15 +96,19 @@ def reject_engine_side_expert_parallel(
     *,
     prefix: str = "actor_rollout_ref.rollout",
 ) -> None:
-    """Refuse engine-side EP flags that bypass the parallel-size accounting.
+    """Refuse engine-side EP flags, which bypass the parallel-size accounting.
 
-    ``engine_kwargs.vllm_omni`` reaches the engine without going through
-    ``expert_parallel_size``. The flat ``enable_expert_parallel`` is overwritten
-    by verl's ``launch_server`` on the AR path (so a request for EP silently runs
-    with EP off) and forwarded unvalidated by the diffusion ingress; the nested
-    ``parallel_config.enable_expert_parallel`` is copied into the engine
-    arguments verbatim. Both are refused in the driver gate and in the rollout
-    replica, because the replica is validated independently of the driver.
+    The flat spelling is overwritten by verl's ``launch_server`` on the AR path
+    and forwarded unvalidated by the diffusion ingress; the nested one is copied
+    into the engine arguments verbatim. Both layers check it because the rollout
+    replica is validated independently of the driver.
+
+    Args:
+        omni_kwargs: The ``engine_kwargs.vllm_omni`` mapping.
+        prefix: Config path used in error messages.
+
+    Raises:
+        ValueError: If either spelling requests expert parallelism.
     """
     if not hasattr(omni_kwargs, "get"):
         return
@@ -127,17 +131,21 @@ def reject_engine_side_expert_parallel(
 
 
 def coerce_expert_parallel_size(raw_ep_size: Any, *, prefix: str = "actor_rollout_ref.rollout") -> int:
-    """Coerce the configured EP size, treating an unset value as "off".
+    """Return the EP degree, treating an unset value as "off".
 
-    ``None`` means the knob was never configured, so EP is off. Any other value
-    must be a whole positive integer: a fractional float or a bool is a
-    configuration error rather than a value to truncate, and a zero or negative
-    degree is an error rather than a way to spell "off".
+    Args:
+        raw_ep_size: The configured size, before coercion.
+        prefix: Config path used in error messages.
+
+    Returns:
+        int: The degree; 1 means EP is off.
+
+    Raises:
+        ValueError: If the value is not a whole positive integer.
     """
     if raw_ep_size is None:
         return 1
-    # bool is an int subclass, so it must be excluded before the numeric checks.
-    if isinstance(raw_ep_size, bool):
+    if isinstance(raw_ep_size, bool):  # bool is an int subclass
         raise ValueError(f"{prefix}.expert_parallel_size must be a positive integer, got {raw_ep_size!r}.")
     if isinstance(raw_ep_size, float) and not raw_ep_size.is_integer():
         raise ValueError(f"{prefix}.expert_parallel_size must be a whole number, got {raw_ep_size!r}.")
@@ -160,14 +168,8 @@ def validate_expert_parallel_degree(
     """Validate an EP size against the parallel layout and return the degree.
 
     Single source of truth for the size contract shared by the driver gate and
-    the rollout replica: both layers must agree, so the rule lives here once.
-
-    ``expert_parallel_size`` is an integer, but vLLM forwards only a boolean over
-    ranks that already exist and derives the degree as TP x DP. A size that
-    disagrees cannot be honored. ``data_parallel_size > 1`` cannot host EP
-    either: the vllm-omni rollout realizes DP as separate TP-sized rollout
-    replicas and the generated deploy config carries no ``data_parallel_size``
-    field, so a stage can only shard experts over its own TP ranks.
+    the rollout replica. vLLM derives the degree as TP x DP, and the vllm-omni
+    deploy config cannot express DP, so only EP == TP with DP == 1 is honored.
 
     Args:
         raw_ep_size: The configured size, before coercion.
@@ -177,6 +179,10 @@ def validate_expert_parallel_degree(
 
     Returns:
         int: The validated degree (1 means EP is off).
+
+    Raises:
+        ValueError: If the size is not a positive integer, disagrees with TP x DP,
+            or pairs a DP > 1 with EP.
     """
     ep_size = coerce_expert_parallel_size(raw_ep_size, prefix=prefix)
     if ep_size == 1:
@@ -202,22 +208,17 @@ def validate_expert_parallel_degree(
 def _validate_expert_parallel(config: Any) -> None:
     """Honor-or-reject gate for rollout expert parallelism.
 
-    ``actor_rollout_ref.rollout.expert_parallel_size`` either configures expert
-    parallelism or fails loudly. The size contract (positive, EP == TP x DP, DP
-    must be 1) lives in :func:`validate_expert_parallel_degree` and is shared with
-    the rollout replica; this gate adds the driver-level rules that need the
-    composed config: the diffusion rollout has no consumer for the knob, and both
-    ``engine_kwargs.vllm_omni`` spellings of the engine flag bypass the size
-    accounting.
-
-    Whether the *model* can run EP needs the architecture, so that half of the
-    gate lives in the rollout replica (``ARStrategy.validate_configs``).
+    Adds the driver-level rules that need the composed config: the diffusion
+    rollout has no consumer for the knob, and both ``engine_kwargs.vllm_omni``
+    spellings of the engine flag bypass the size accounting. The size contract is
+    shared with the rollout replica via :func:`validate_expert_parallel_degree`;
+    whether the model can run EP needs the architecture, so that half lives in
+    the replica.
     """
     rollout = "actor_rollout_ref.rollout"
     raw_ep_size = _select(config, f"{rollout}.expert_parallel_size", 1)
 
-    # Both escape hatches are checked before the EP==1 early return: they bypass
-    # the size accounting even when the size knob itself is left at 1.
+    # Before the EP==1 early return: both spellings bypass the size accounting.
     reject_engine_side_expert_parallel(
         _select(config, f"{rollout}.engine_kwargs.vllm_omni", None) or {},
         prefix=rollout,
@@ -229,8 +230,7 @@ def _validate_expert_parallel(config: Any) -> None:
     if ep_size == 1:
         return
 
-    # ``rollout_attn_backend`` is a DiffusionRolloutConfig field; verl's
-    # RolloutConfig (the omni/AR rollout) has no such key.
+    # Diffusion-only field; verl's RolloutConfig has no such key.
     if _select(config, f"{rollout}.rollout_attn_backend", None) is not None:
         raise ValueError(
             f"{rollout}.expert_parallel_size={ep_size} is not supported by the diffusion rollout: "

@@ -78,9 +78,8 @@ class ARStrategy(OmniStrategyBase):
         config = self.server.config
         if config.max_model_len is None:
             config.max_model_len = config.prompt_length + config.response_length
-        # A null size means "unset": normalize it before the launcher compares it
-        # (verl's launch_server evaluates ``expert_parallel_size > 1``).
-        if getattr(config, "expert_parallel_size", 1) is None:
+        # The launcher compares this field, so an unset value must become 1.
+        if config.expert_parallel_size is None:
             config.expert_parallel_size = 1
         reject_engine_side_expert_parallel(self._omni_engine_kwargs())
         pipeline_name, pipeline_mode = self._pipeline_selection()
@@ -88,8 +87,7 @@ class ARStrategy(OmniStrategyBase):
 
     def _omni_engine_kwargs(self) -> Any:
         """Return the configured ``engine_kwargs.vllm_omni`` mapping."""
-        config = getattr(self.server, "config", None)
-        return (getattr(config, "engine_kwargs", None) or {}).get("vllm_omni", {}) or {}
+        return (self.server.config.engine_kwargs or {}).get("vllm_omni", {}) or {}
 
     def _pipeline_selection(self) -> tuple[Any, str]:
         """Return the configured ``(pipeline_name, pipeline_mode)``."""
@@ -99,20 +97,25 @@ class ARStrategy(OmniStrategyBase):
     def _resolve_expert_parallel_stage_ids(self, pipeline_name: Any, pipeline_mode: str) -> frozenset[int]:
         """Return the stages to run with expert parallelism, or refuse EP>1.
 
-        Expert parallelism reaches vLLM-Omni as a per-stage boolean over the
-        ranks a stage already spans, so it is only honored when the selected
-        pipeline opts its policy stage in. Every other combination raises here
-        instead of sending the engine a flag it would ignore.
+        vLLM-Omni takes EP as a per-stage boolean over the ranks a stage already
+        spans, so it is honored only when the selected pipeline opts its policy
+        stage in.
+
+        Args:
+            pipeline_name: The configured ``engine_kwargs.vllm_omni.pipeline_name``.
+            pipeline_mode: The configured ``engine_kwargs.vllm_omni.pipeline_mode``.
+
+        Returns:
+            frozenset[int]: Stage IDs that may receive ``enable_expert_parallel``.
+
+        Raises:
+            ValueError: If the size is invalid or the pipeline does not opt in.
         """
-        config = getattr(self.server, "config", None)
-        if config is None:
-            # Unit-test doubles construct the strategy without a rollout config;
-            # the real server always sets one before validate_configs runs.
-            return frozenset()
+        config = self.server.config
         ep_size = validate_expert_parallel_degree(
-            getattr(config, "expert_parallel_size", None),
-            int(getattr(config, "tensor_model_parallel_size", 1)),
-            int(getattr(config, "data_parallel_size", 1)),
+            config.expert_parallel_size,
+            int(config.tensor_model_parallel_size),
+            int(config.data_parallel_size),
         )
         if ep_size == 1:
             return frozenset()
@@ -162,9 +165,6 @@ class ARStrategy(OmniStrategyBase):
                     "cannot be replayed by its actor adapter."
                 )
             self._rollout_adapter = adapter_cls
-            # Resolved again here (not only in validate_configs) so a caller that
-            # reaches engine creation without validation still cannot drop EP.
-            self._expert_parallel_stage_ids = self._resolve_expert_parallel_stage_ids(pipeline_name, pipeline_mode)
             self._write_deploy_config(engine_kwargs, pipeline_name, adapter_cls, pipeline_mode)
             self.server._rollout_flags = adapter_cls.rollout_flags(pipeline_mode=pipeline_mode)
             adapter_overrides = adapter_cls.get_engine_hf_overrides(pipeline_mode=pipeline_mode)
@@ -199,8 +199,8 @@ class ARStrategy(OmniStrategyBase):
         pipeline_mode: str,
     ) -> None:
         """Write a deploy config YAML from the adapter's stage topology."""
-        adapter_cls.ensure_pipeline_registered(pipeline_mode)
         expert_parallel_stage_ids = self._expert_parallel_stage_ids
+        adapter_cls.ensure_pipeline_registered(pipeline_mode)
         stages = adapter_cls.build_stage_configs(pipeline_mode=pipeline_mode)
         stage_ids = [stage.stage_id for stage in stages]
         policy_stage_id = adapter_cls.policy_stage_id(pipeline_mode=pipeline_mode)

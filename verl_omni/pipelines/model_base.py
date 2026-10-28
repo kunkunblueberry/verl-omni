@@ -997,15 +997,9 @@ class OmniRolloutPipelineBase:
     def expert_parallel_stage_ids(cls, pipeline_mode="thinker_only") -> frozenset[int]:
         """Return stages whose MoE layers may run under expert parallelism.
 
-        vLLM-Omni takes expert parallelism as a per-stage boolean
-        (``enable_expert_parallel``) over the ranks that stage already spans, not
-        as an extra world dimension, so the deploy config carries a flag rather
-        than a size. A pipeline opts in per stage here; the rollout refuses
-        ``expert_parallel_size > 1`` for every pipeline that does not, instead of
-        forwarding a flag the stage would ignore.
-
-        Default returns an empty set: models that are dense, or that have no
-        measured reason to shard experts, get the fail-closed path for free.
+        vLLM-Omni takes EP as a per-stage flag over the ranks that stage already
+        spans, so the deploy config carries a flag rather than a size. The default
+        empty set keeps dense pipelines on the fail-closed path.
 
         Args:
             pipeline_mode: The mode used to build the stages.
@@ -1017,14 +1011,11 @@ class OmniRolloutPipelineBase:
 
     @classmethod
     def expert_parallel_pipelines(cls) -> dict[str, frozenset[int]]:
-        """Return every registered pipeline that opts into expert parallelism.
-
-        Used to name the supported combinations when the rollout refuses an
-        ``expert_parallel_size`` the selected pipeline cannot honor.
+        """Return registered pipelines that opt into expert parallelism.
 
         Returns:
-            dict[str, frozenset[int]]: Registered pipeline model_type to its
-            expert-parallel stage IDs, omitting pipelines that opt out.
+            dict[str, frozenset[int]]: Pipeline model_type to its EP stage IDs,
+            omitting pipelines that opt out.
         """
         supported: dict[str, frozenset[int]] = {}
         for model_type, adapter_cls in cls._registry.items():

@@ -217,22 +217,14 @@ def test_rollout_parallel_config_escape_hatch_is_rejected():
 
 
 def test_rollout_flat_enable_expert_parallel_is_rejected():
-    """verl's launch_server overwrites the engine arg from expert_parallel_size.
-
-    The flat spelling is never honored on the AR path and reaches the diffusion
-    engine unvalidated, so it must be refused in both shapes.
-    """
+    """The flat spelling is never honored on AR and unvalidated on diffusion."""
     config = _rollout_config(engine_kwargs={"vllm_omni": {"enable_expert_parallel": True}})
     with pytest.raises(ValueError, match="not a supported spelling"):
         validate_config(config)
 
 
 def test_rollout_ep_with_dp_greater_than_one_is_rejected():
-    """DP>1 realizes separate TP-sized replicas; a stage can only shard over its TP ranks.
-
-    Accepting EP=TP*DP with DP>1 would silently deliver EP=TP, so it is refused
-    until a run demonstrates the deploy config can express it.
-    """
+    """DP>1 cannot express EP in the deploy config, so accepting it would lie."""
     config = _rollout_config(expert_parallel_size=4, tensor_model_parallel_size=2, data_parallel_size=2)
     with pytest.raises(ValueError, match=r"data_parallel_size=2 is not wired"):
         validate_config(config)
