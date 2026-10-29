@@ -223,6 +223,13 @@ def test_rollout_flat_enable_expert_parallel_is_rejected():
         validate_config(config)
 
 
+def test_rollout_stage_override_ep_is_rejected():
+    """The vLLM-Omni resolver applies stage_overrides over the deploy config."""
+    config = _rollout_config(engine_kwargs={"vllm_omni": {"stage_overrides": {"0": {"enable_expert_parallel": True}}}})
+    with pytest.raises(ValueError, match="stage_overrides"):
+        validate_config(config)
+
+
 def test_rollout_ep_with_dp_greater_than_one_is_rejected():
     """DP>1 cannot express EP in the deploy config, so accepting it would lie."""
     config = _rollout_config(expert_parallel_size=4, tensor_model_parallel_size=2, data_parallel_size=2)

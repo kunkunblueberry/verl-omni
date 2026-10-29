@@ -45,12 +45,14 @@ def _ar_strategy(*, ep=1, tp=2, dp=1, pipeline_name=QWEN3_OMNI_PIPELINE, pipelin
     return ARStrategy(types.SimpleNamespace(config=config))
 
 
-def _diffusion_strategy(*, ep=1, parallel_config=None, flat_flag=False):
+def _diffusion_strategy(*, ep=1, parallel_config=None, flat_flag=False, stage_overrides=None):
     omni_kwargs: dict = {}
     if parallel_config is not None:
         omni_kwargs["parallel_config"] = parallel_config
     if flat_flag:
         omni_kwargs["enable_expert_parallel"] = True
+    if stage_overrides is not None:
+        omni_kwargs["stage_overrides"] = stage_overrides
     config = types.SimpleNamespace(expert_parallel_size=ep, engine_kwargs={"vllm_omni": omni_kwargs})
     return DiffusionStrategy(types.SimpleNamespace(config=config))
 
@@ -113,6 +115,7 @@ def test_ep_with_dp_greater_than_one_is_refused():
     [
         {"enable_expert_parallel": True},
         {"parallel_config": {"enable_expert_parallel": True}},
+        {"stage_overrides": {"0": {"enable_expert_parallel": True}}},
     ],
 )
 def test_replica_rejects_engine_side_ep_overrides(engine_kwargs):
@@ -213,6 +216,13 @@ def test_diffusion_parallel_config_escape_hatch_is_refused():
 def test_diffusion_flat_enable_expert_parallel_is_refused():
     """The diffusion ingress forwards the flat flag unvalidated, so it is a live hatch."""
     strategy = _diffusion_strategy(ep=1, flat_flag=True)
+    with pytest.raises(ValueError, match="not wired for the diffusion rollout"):
+        strategy.validate_configs()
+
+
+def test_diffusion_stage_override_ep_is_refused():
+    """stage_overrides entries are applied over the deploy config, so they are a hatch too."""
+    strategy = _diffusion_strategy(ep=1, stage_overrides={"0": {"enable_expert_parallel": True}})
     with pytest.raises(ValueError, match="not wired for the diffusion rollout"):
         strategy.validate_configs()
 

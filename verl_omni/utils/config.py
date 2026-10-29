@@ -100,15 +100,18 @@ def reject_engine_side_expert_parallel(
 
     The flat spelling is overwritten by verl's ``launch_server`` on the AR path
     and forwarded unvalidated by the diffusion ingress; the nested one is copied
-    into the engine arguments verbatim. Both layers check it because the rollout
-    replica is validated independently of the driver.
+    into the engine arguments verbatim; and the ``stage_overrides`` resolver
+    applies its entries over the generated deploy config's stage values. All
+    three can turn EP on or off regardless of the validated size, so all three
+    are refused. Both layers check because the rollout replica is validated
+    independently of the driver.
 
     Args:
         omni_kwargs: The ``engine_kwargs.vllm_omni`` mapping.
         prefix: Config path used in error messages.
 
     Raises:
-        ValueError: If either spelling requests expert parallelism.
+        ValueError: If any spelling requests expert parallelism.
     """
     if not hasattr(omni_kwargs, "get"):
         return
@@ -128,6 +131,15 @@ def reject_engine_side_expert_parallel(
             f"{prefix}.expert_parallel_size, and the engine-side flag is then set from that size. "
             f"Set {prefix}.expert_parallel_size instead and drop the engine_kwargs entry."
         )
+    for key, value in (omni_kwargs.get("stage_overrides") or {}).items():
+        if hasattr(value, "get") and value.get("enable_expert_parallel", False):
+            raise ValueError(
+                f"{prefix}.engine_kwargs.vllm_omni.stage_overrides[{key!r}].enable_expert_parallel "
+                "bypasses the parallel-size accounting: the vLLM-Omni resolver applies stage "
+                "overrides over the generated deploy config, so the flag would be honored without "
+                f"accounting. Set {prefix}.expert_parallel_size instead and drop the "
+                "stage_overrides entry."
+            )
 
 
 def coerce_expert_parallel_size(raw_ep_size: Any, *, prefix: str = "actor_rollout_ref.rollout") -> int:

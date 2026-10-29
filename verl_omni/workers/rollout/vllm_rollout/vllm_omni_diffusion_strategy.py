@@ -253,14 +253,18 @@ class DiffusionStrategy(OmniStrategyBase):
         parallel_config = omni_kwargs.get("parallel_config") or {}
         nested_flag = hasattr(parallel_config, "get") and bool(parallel_config.get("enable_expert_parallel", False))
         flat_flag = bool(omni_kwargs.get("enable_expert_parallel", False))
-        if ep_size == 1 and not (nested_flag or flat_flag):
+        stage_flag = any(
+            hasattr(overrides, "get") and bool(overrides.get("enable_expert_parallel", False))
+            for overrides in (omni_kwargs.get("stage_overrides") or {}).values()
+        )
+        if ep_size == 1 and not (nested_flag or flat_flag or stage_flag):
             return
         raise ValueError(
             "Expert parallelism is not wired for the diffusion rollout: no diffusion stage consumes "
             "actor_rollout_ref.rollout.expert_parallel_size, and vLLM-Omni enables diffusion EP only for "
             "pipelines that opt in through their own stage config. Leave expert_parallel_size=1 and drop "
-            "any enable_expert_parallel entry from engine_kwargs.vllm_omni (both the flat key and "
-            "parallel_config)."
+            "any enable_expert_parallel entry from engine_kwargs.vllm_omni (flat key, parallel_config, "
+            "or stage_overrides)."
         )
 
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
