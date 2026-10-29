@@ -8,6 +8,8 @@
 [![Docs](https://img.shields.io/badge/docs-Read%20the%20Docs-8A2BE2)](https://verl-omni.readthedocs.io/en/latest/index.html)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE) <a href="docs/assets/WeChat.jpg"><img src="https://img.shields.io/badge/微信-green?logo=wechat"></a> <a href="https://join.slack.com/t/verl-project/shared_invite/zt-4bb32of1g-c~szeecZ2fufGeSadsIefw"><img src="https://img.shields.io/badge/Slack-verl-blueviolet?logo=slack"></a> <a href="https://drive.google.com/file/d/1EGVFZdvRgSBymMlZa62FObbzEhMoLA0F/view?usp=sharing"><img src="https://img.shields.io/badge/Slides-verl--omni-orange?logo=google-drive&logoColor=white"></a>
 
+[English](https://github.com/verl-project/verl-omni/blob/main/README.md) | [简体中文](https://github.com/verl-project/verl-omni/blob/main/README.zh.md)
+
 </div>
 
 `VeRL-Omni` is a general RL training framework focused on multimodal generative models, built on top of [`verl`](https://github.com/verl-project/verl).
