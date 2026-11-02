@@ -121,11 +121,9 @@ class ARStrategy(OmniStrategyBase):
             return frozenset()
 
         adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
-        hook = getattr(adapter_cls, "expert_parallel_stage_ids", None)
-        if hook is not None:
-            supported = hook(pipeline_mode)
+        if adapter_cls is not None:
             policy_stage_id = adapter_cls.policy_stage_id(pipeline_mode=pipeline_mode)
-            if policy_stage_id in supported:
+            if policy_stage_id in adapter_cls.expert_parallel_stage_ids(pipeline_mode):
                 return frozenset({policy_stage_id})
 
         supported_pipelines = ", ".join(sorted(OmniRolloutPipelineBase.expert_parallel_pipelines())) or "none"

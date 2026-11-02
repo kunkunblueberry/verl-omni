@@ -13,7 +13,7 @@ fsdp_size: -1
 # Qwen-Image VeOmni backend does not support Ulysses SP yet.
 ulysses_parallel_size: 1
 
-# Expert parallel size. Kept for config compatibility; Qwen-Image uses 1.
+# Expert parallel size for the VeOmni training engine.
 expert_parallel_size: 1
 
 # Initialize the model on meta before FSDP2 weight loading.
